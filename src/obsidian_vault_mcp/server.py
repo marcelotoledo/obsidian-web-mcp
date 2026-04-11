@@ -44,8 +44,7 @@ mcp = FastMCP(
             "127.0.0.1:*",
             "localhost:*",
             "[::1]:*",
-            # Add your tunnel hostname here, e.g.:
-            # "vault-mcp.example.com",
+            "mt-mb-pro",  # Tailscale hostname
         ],
     ),
 )
