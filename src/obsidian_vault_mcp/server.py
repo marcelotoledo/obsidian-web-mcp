@@ -44,7 +44,7 @@ mcp = FastMCP(
             "127.0.0.1:*",
             "localhost:*",
             "[::1]:*",
-            "mt-mb-pro",  # Tailscale hostname
+            "mt-mb-pro.tailcc1eaf.ts.net",  # Tailscale hostname
         ],
     ),
 )
