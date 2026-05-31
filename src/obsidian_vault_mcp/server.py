@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from .config import VAULT_MCP_PORT, VAULT_MCP_TOKEN, VAULT_PATH
+from .config import VAULT_MCP_ALLOWED_HOSTS, VAULT_MCP_PORT, VAULT_MCP_TOKEN, VAULT_PATH
 from .frontmatter_index import FrontmatterIndex
 
 logger = logging.getLogger(__name__)
@@ -39,12 +39,7 @@ mcp = FastMCP(
     lifespan=lifespan,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "127.0.0.1:*",
-            "localhost:*",
-            "[::1]:*",
-            "mt-mb-pro.tailcc1eaf.ts.net",  # Tailscale hostname
-        ],
+        allowed_hosts=VAULT_MCP_ALLOWED_HOSTS,
     ),
 )
 
@@ -52,12 +47,14 @@ mcp = FastMCP(
 # --- Register all tools ---
 
 from .tools.read import vault_read as _vault_read, vault_batch_read as _vault_batch_read
-from .tools.write import vault_write as _vault_write, vault_batch_frontmatter_update as _vault_batch_frontmatter_update
+from .tools.write import vault_write as _vault_write, vault_batch_frontmatter_update as _vault_batch_frontmatter_update, vault_patch as _vault_patch, vault_append as _vault_append
 from .tools.search import vault_search as _vault_search, vault_search_frontmatter as _vault_search_frontmatter
 from .tools.manage import vault_list as _vault_list, vault_move as _vault_move, vault_delete as _vault_delete
 from .models import (
     VaultReadInput,
     VaultWriteInput,
+    VaultPatchInput,
+    VaultAppendInput,
     VaultBatchReadInput,
     VaultBatchFrontmatterUpdateInput,
     VaultSearchInput,
@@ -99,6 +96,28 @@ def vault_write(path: str, content: str, create_dirs: bool = True, merge_frontma
     """Write a file to the vault."""
     inp = VaultWriteInput(path=path, content=content, create_dirs=create_dirs, merge_frontmatter=merge_frontmatter)
     return _vault_write(inp.path, inp.content, inp.create_dirs, inp.merge_frontmatter)
+
+
+@mcp.tool(
+    name="vault_patch",
+    description="Surgically replace a string in a vault file without rewriting the whole file. Fails if the string appears 0 or >1 times (use replace_all=True for multi-replace). Prefer this over vault_write when editing a section of a large file.",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def vault_patch(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+    """Surgical string replacement in a vault file."""
+    inp = VaultPatchInput(path=path, old_string=old_string, new_string=new_string, replace_all=replace_all)
+    return _vault_patch(inp.path, inp.old_string, inp.new_string, inp.replace_all)
+
+
+@mcp.tool(
+    name="vault_append",
+    description="Append content to a vault file without rewriting the whole file. Creates the file if it doesn't exist. Use for adding log entries, session notes, or new sections to the end of a file.",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def vault_append(path: str, content: str, separator: str = "\n") -> str:
+    """Append content to a vault file."""
+    inp = VaultAppendInput(path=path, content=content, separator=separator)
+    return _vault_append(inp.path, inp.content, inp.separator)
 
 
 @mcp.tool(
@@ -233,7 +252,19 @@ def main():
             app.routes.insert(0, route)
 
         app.add_middleware(BearerAuthMiddleware)
-        logger.info(f"Starting server on port {VAULT_MCP_PORT} with bearer auth + OAuth")
+
+        from starlette.middleware.cors import CORSMiddleware
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["https://claude.ai", "https://*.claude.ai", "https://anthropic.com", "https://*.anthropic.com"],
+            allow_origin_regex=r"https://([a-z0-9-]+\.)*(claude\.ai|anthropic\.com)",
+            allow_methods=["GET", "POST", "OPTIONS", "HEAD", "DELETE"],
+            allow_headers=["authorization", "content-type", "mcp-protocol-version", "mcp-session-id", "accept"],
+            expose_headers=["mcp-protocol-version", "mcp-session-id", "www-authenticate"],
+            allow_credentials=True,
+            max_age=86400,
+        )
+        logger.info(f"Starting server on port {VAULT_MCP_PORT} with bearer auth + OAuth + CORS")
 
         import uvicorn
         uvicorn.run(
