@@ -1,236 +1,117 @@
 # obsidian-web-mcp
 
-A secure, remote-accessible MCP server that gives LLMs read/write access to your Obsidian vault from anywhere -- your desktop, your phone, a hotel Wi-Fi network. Unlike local-only Obsidian MCP servers, this one runs over HTTPS with real authentication, so Claude (or any MCP client) can reach your vault whether you're at your desk or not.
+Your Obsidian vault, accessible from Claude everywhere.
 
-It reads and writes markdown files on disk, parses YAML frontmatter, maintains an in-memory frontmatter index for fast queries, and handles full-text search -- all behind OAuth 2.0 authentication and a Cloudflare Tunnel that never exposes your machine directly to the internet.
+This MCP server runs on the machine where your vault lives and exposes it securely over HTTPS — so Claude on the web, desktop, and mobile can all read and write your notes, not just Claude Code on your local machine.
 
-## Why This Exists
+## What this fork adds
 
-There are many Obsidian MCP servers. Most are local stdio servers -- they work when Claude Code is running on the same machine as your vault. That's useful, but it means:
+The original project is a solid foundation. This fork extends it with:
 
-- **Claude.ai (web) can't reach your vault.** The browser-based Claude has no way to connect to a local stdio server.
-- **Claude on your phone can't reach your vault.** Same problem.
-- **If you use Obsidian Sync, local MCP servers can corrupt files.** Non-atomic writes create partial files that Sync propagates to every device.
-
-This server solves all three. It runs as a persistent HTTP service on the machine where your vault lives, tunneled securely through Cloudflare, and authenticates via OAuth 2.0 -- the same protocol Claude uses for Gmail, Google Calendar, and other integrations. The result: your vault becomes a first-class MCP connector available everywhere Claude is.
-
-## Architecture
-
-```
-+----------+     +------------+     +-----------------+     +------------------+
-| Obsidian | <-> | Filesystem | <-> | obsidian-web-mcp| <-> | Cloudflare       |
-| (app)    |     | (*.md)     |     | (MCP over HTTPS)|     | Tunnel           |
-+----------+     +------------+     +-----------------+     +------------------+
-                                                                   |
-                                                            +------+-------+
-                                                            | Claude       |
-                                                            | (web/desktop/|
-                                                            |  mobile)     |
-                                                            +--------------+
-```
-
-Your vault files never leave your machine. Cloudflare Tunnel creates an outbound-only connection from your server to Cloudflare's edge -- no inbound ports opened, no public IP exposed, no port forwarding. Claude connects to the Cloudflare edge, which relays requests through the tunnel to your server.
-
-Obsidian and the MCP server both operate on the same directory of markdown files. The server uses atomic writes (write-to-temp-then-rename) so Obsidian Sync and the server never conflict.
-
-## Security Model
-
-This is a server that provides network access to your personal notes. Security is not optional.
-
-**Authentication is enforced on every request.** The server implements OAuth 2.0 authorization code flow with PKCE for initial client authentication (what Claude uses when you connect the integration), plus bearer token validation on every subsequent MCP tool call. No request reaches a tool function without a valid token.
-
-**Your vault is never exposed directly to the internet.** The recommended deployment uses a Cloudflare Tunnel -- an outbound-only encrypted connection. Your machine opens no inbound ports. You can layer Cloudflare Access on top for additional authentication (SSO, device posture checks, IP restrictions) if you want defense in depth.
-
-**Path traversal is blocked at the filesystem layer.** Every file operation resolves paths against the vault root directory and rejects any attempt to escape it -- `..` traversal, symlink following, null byte injection, and dotfile access (`.obsidian`, `.git`, `.trash`) are all caught before they reach the filesystem. The server will never read or write outside your vault directory.
-
-**Writes are atomic.** Every file write goes to a temporary file first, then atomically replaces the target via `os.replace()`. This guarantees that neither Obsidian nor Obsidian Sync ever sees a partially-written file -- the operation either completes fully or doesn't happen at all.
-
-**Safety limits prevent abuse.** Writes are capped at 1MB per file, batch operations at 20 files per request, and search results at 50 matches. Deletions are soft -- files move to `.trash/` rather than being permanently removed, matching Obsidian's own behavior. The delete tool also requires an explicit `confirm=true` parameter as a safety gate.
+- **Full OAuth 2.0 support** — works with claude.ai's "Add custom connector" flow out of the box. No API keys to paste, no manual token management.
+- **Tunnel-agnostic deployment** — one env variable (`VAULT_MCP_ALLOWED_HOSTS`) is all it takes to work with Tailscale Funnel, Cloudflare Tunnel, or any reverse proxy.
+- **Surgical file editing** — two new tools (`vault_patch`, `vault_append`) let Claude edit a section of a large file without rewriting the whole thing.
 
 ## Tools
 
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
-| `vault_read` | Read a file, returning content, metadata, and parsed YAML frontmatter |
-| `vault_batch_read` | Read multiple files in one call; handles missing files gracefully |
-| `vault_write` | Write a file with optional frontmatter merging; creates parent dirs |
-| `vault_batch_frontmatter_update` | Update YAML frontmatter fields on multiple files without touching body content |
-| `vault_search` | Full-text search across vault files (uses ripgrep if available, falls back to Python) |
-| `vault_search_frontmatter` | Query the in-memory frontmatter index by field value, substring, or field existence |
-| `vault_list` | List directory contents with recursion depth, glob filtering, and file/dir toggles |
-| `vault_move` | Move or rename a file or directory within the vault |
-| `vault_delete` | Soft-delete a file by moving it to `.trash/` (requires explicit confirmation) |
+| `vault_read` | Read a file — content, metadata, and parsed frontmatter |
+| `vault_batch_read` | Read multiple files in one call |
+| `vault_write` | Write or overwrite a file; optionally merge frontmatter |
+| `vault_patch` | ✦ Replace a specific string in a file without rewriting it |
+| `vault_append` | ✦ Add content to the end of a file |
+| `vault_batch_frontmatter_update` | Update frontmatter fields on multiple files at once |
+| `vault_search` | Full-text search across all vault files |
+| `vault_search_frontmatter` | Search files by frontmatter field value |
+| `vault_list` | List files and folders with optional depth and glob filtering |
+| `vault_move` | Move or rename a file or directory |
+| `vault_delete` | Soft-delete a file (moves to `.trash/`, not permanent) |
 
-## Prerequisites
-
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- An Obsidian vault (any directory of markdown files)
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (only needed for remote access)
-- A domain managed by Cloudflare (only needed for remote access)
+✦ Added in this fork
 
 ## Quick Start
 
-### Local development
+### Requirements
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/)
+- An Obsidian vault (any folder of markdown files)
+
+### Run locally
 
 ```bash
-# Clone and enter the project
-git clone https://github.com/yourname/obsidian-web-mcp.git
+git clone https://github.com/marcelotoledo/obsidian-web-mcp.git
 cd obsidian-web-mcp
 
-# Generate auth tokens
-export VAULT_MCP_TOKEN=$(python -c "import secrets; print(secrets.token_hex(32))")
-export VAULT_OAUTH_CLIENT_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")
+cp .env.example .env
+# Edit .env: set VAULT_PATH and generate tokens (see comments inside)
 
-# Point at your vault
-export VAULT_PATH="$HOME/Obsidian/MyVault"
-
-# Run the server
 uv run vault-mcp
 ```
 
-The server starts on port 8420 by default. It serves MCP over Streamable HTTP at `/mcp/`.
-
-## Configuration
-
-All configuration is via environment variables:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `VAULT_PATH` | Yes | `~/Obsidian/MyVault` | Absolute path to your Obsidian vault directory |
-| `VAULT_MCP_TOKEN` | Yes | (none) | 256-bit bearer token for authenticating MCP requests |
-| `VAULT_MCP_PORT` | No | `8420` | Port the HTTP server listens on |
-| `VAULT_OAUTH_CLIENT_ID` | No | `vault-mcp-client` | OAuth 2.0 client ID for Claude integration |
-| `VAULT_OAUTH_CLIENT_SECRET` | Yes | (none) | OAuth 2.0 client secret for Claude integration |
-
-Generate tokens with: `python -c "import secrets; print(secrets.token_hex(32))"`
+The server starts on port 8420. That's it.
 
 ## Connecting to Claude
 
-The Claude desktop and mobile apps can connect to remote MCP servers via OAuth.
+There are three ways to connect, depending on how you're using Claude:
 
-1. Start the server (locally or behind a tunnel)
-2. Open Claude and go to **Settings > Integrations > Add Integration**
-3. Enter your server URL (e.g. `https://vault-mcp.yourdomain.com`)
-4. Enter the OAuth client ID and client secret you configured
-5. Claude will discover the OAuth endpoints automatically and open a browser window
-6. The server auto-approves the authorization (single-user model) and redirects back
-7. Claude now has access to all nine vault tools -- on desktop and mobile
+**Option A — claude.ai web and mobile (recommended)**  
+Go to **Settings → Integrations → Add custom connector** and enter your server's public URL. Claude handles the OAuth flow automatically.
 
-For local-only use (no tunnel), point Claude at `http://localhost:8420`.
-
-## Remote Access with Cloudflare Tunnel
-
-To make the server accessible from anywhere:
+**Option B — Claude Code with a static token**
 
 ```bash
-# Install cloudflared
-brew install cloudflare/cloudflare/cloudflared
+claude mcp add --scope user --transport http obsidian-vault \
+  https://your-server-url \
+  --header "Authorization: Bearer YOUR_VAULT_MCP_TOKEN"
+```
 
-# Set your desired hostname and run the interactive setup
-export VAULT_MCP_HOSTNAME="vault-mcp.yourdomain.com"
+**Option C — Claude Desktop (legacy)**  
+Add an `npx mcp-remote` block to `claude_desktop_config.json`.  
+⚠️ Don't use Option A and Option C at the same time — they conflict.
+
+## Remote Access
+
+The server runs locally and needs a secure tunnel to be reachable from the internet. Two options:
+
+**Tailscale Funnel** (easier — no domain required)
+
+```bash
+tailscale funnel 8420
+```
+
+Then set `VAULT_MCP_ALLOWED_HOSTS=your-machine.tailnet.ts.net` in your `.env`.
+
+**Cloudflare Tunnel** (if you already have a domain on Cloudflare)
+
+```bash
+brew install cloudflare/cloudflare/cloudflared
 ./scripts/setup-tunnel.sh
 ```
 
-The script authenticates with Cloudflare, creates a tunnel, writes the config, and sets up the DNS record. You will need a domain managed by Cloudflare.
+Then set `VAULT_MCP_ALLOWED_HOSTS=vault-mcp.yourdomain.com` in your `.env`.
 
-After setup, add your tunnel hostname to the `allowed_hosts` list in `server.py` so the MCP library's DNS rebinding protection accepts requests from your domain:
+Both work the same way from Claude's perspective.
 
-```python
-allowed_hosts=[
-    "127.0.0.1:*",
-    "localhost:*",
-    "[::1]:*",
-    "vault-mcp.yourdomain.com",  # add your hostname here
-],
-```
+## Production (macOS)
 
-## Production Deployment (macOS)
-
-For always-on operation, use launchd to run both the MCP server and the Cloudflare Tunnel as persistent background services that start at login and restart on failure.
-
-### 1. Edit the plist templates
+To run the server automatically at login and keep it alive:
 
 ```bash
 cp scripts/launchd/com.example.vault-mcp.plist ~/Library/LaunchAgents/
-cp scripts/launchd/com.example.cloudflared-vault.plist ~/Library/LaunchAgents/
-```
-
-Open each plist and replace the placeholder tokens:
-- `REPLACE_WITH_UV_PATH` -- path to `uv` binary (run `which uv`)
-- `REPLACE_WITH_PROJECT_PATH` -- absolute path to this project directory
-- `REPLACE_WITH_VAULT_PATH` -- absolute path to your Obsidian vault
-- `REPLACE_WITH_TOKEN` -- your `VAULT_MCP_TOKEN` value
-- `REPLACE_WITH_OAUTH_SECRET` -- your `VAULT_OAUTH_CLIENT_SECRET` value
-- `REPLACE_WITH_HOME` -- your home directory (e.g. `/Users/yourname`)
-- `REPLACE_WITH_CLOUDFLARED_PATH` -- path to `cloudflared` binary (run `which cloudflared`)
-
-### 2. Load the services
-
-```bash
+# Edit the plist to fill in your paths and tokens
 launchctl load ~/Library/LaunchAgents/com.example.vault-mcp.plist
-launchctl load ~/Library/LaunchAgents/com.example.cloudflared-vault.plist
 ```
 
-Both services are configured with `RunAtLoad` (start at login) and `KeepAlive` (restart on failure). They will survive reboots.
-
-### 3. Verify
-
-```bash
-# Check both services are running
-launchctl list | grep vault
-
-# Test the server responds
-curl -s http://localhost:8420/.well-known/oauth-authorization-server
-
-# Check logs
-tail -f ~/Library/Logs/vault-mcp-error.log
-```
-
-## Obsidian Sync Compatibility
-
-The server coexists with Obsidian Sync (or any file-based sync mechanism) without conflict. All writes use atomic file replacement (`write-to-temp-then-rename`), which means:
-
-- Obsidian never sees a half-written file
-- If Sync and the MCP server write to the same file simultaneously, the last write wins (standard filesystem semantics) but neither write is corrupted
-- The frontmatter index watches for filesystem changes via `watchdog` and updates automatically when Sync brings in new files
+Logs go to `~/Library/Logs/vault-mcp.log` and `~/Library/Logs/vault-mcp-error.log`.
 
 ## Development
 
-### Running tests
-
 ```bash
-uv run pytest tests/ -v
-```
-
-Tests use temporary directories and never touch your real vault.
-
-### Project structure
-
-```
-src/obsidian_vault_mcp/
-    auth.py                 # Bearer token middleware (Starlette)
-    config.py               # Environment variable configuration
-    frontmatter_index.py    # In-memory YAML frontmatter index with filesystem watcher
-    models.py               # Pydantic input validation models
-    oauth.py                # OAuth 2.0 authorization code flow with PKCE
-    server.py               # FastMCP server setup, tool registration, entry point
-    vault.py                # Core filesystem operations (path security, atomic writes)
-    tools/
-        manage.py           # list, move, delete tools
-        read.py             # read, batch_read tools
-        search.py           # full-text search, frontmatter search tools
-        write.py            # write, batch_frontmatter_update tools
-tests/
-    conftest.py             # Shared fixtures (temp vault with sample files)
-    test_frontmatter.py     # Frontmatter index and query tests
-    test_tools.py           # Integration tests for tool functions
-    test_vault.py           # Path resolution and file operation tests
-scripts/
-    setup-tunnel.sh         # Interactive Cloudflare Tunnel setup
-    launchd/                # macOS launchd plist templates
+uv run pytest tests/ -v   # all tests use temp dirs, never touch your real vault
 ```
 
 ## License
 
-MIT -- see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
